@@ -11,6 +11,12 @@ from typing import Dict, List, Tuple, Any
 import numpy as np
 import pandas as pd
 from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.impute import SimpleImputer
+from sklearn.pipeline import Pipeline as SklearnPipeline
+from sklearn.preprocessing import StandardScaler
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import roc_auc_score
+from tqdm.auto import tqdm
 
 from .data_loader import DataLoader
 from .smiles_parser import SMILESParser
@@ -35,21 +41,41 @@ class Pipeline:
     This class coordinates all components to:
     1. Load and parse training data
     2. Generate multiple feature representations
-    3. Train and evaluate multiple model/feature combinations
+    3. Train and evaluate multiple model/feature combinations (with param sweeps)
     4. Select the best model based on cross-validation AUC
-    5. Generate predictions for test data
+    5. Produce a hold-out AUC estimate to reduce selection bias
+    6. Generate predictions for test data
     """
 
     FEATURE_TYPES = ['descriptors', 'fingerprints', 'combined']
-    ALGORITHMS = ['random_forest', 'gradient_boosting']
+    MODEL_CONFIGS = {
+        'random_forest': [
+            {'n_estimators': 200, 'max_depth': None, 'max_features': None, 'min_samples_leaf': 1},
+            {'n_estimators': 400, 'max_depth': None, 'max_features': 'sqrt', 'min_samples_leaf': 1},
+            {'n_estimators': 600, 'max_depth': None, 'max_features': 'log2', 'min_samples_leaf': 1},
+            {'n_estimators': 300, 'max_depth': 25, 'max_features': None, 'min_samples_leaf': 2},
+            {'n_estimators': 400, 'max_depth': 30, 'max_features': 'sqrt', 'min_samples_leaf': 2},
+            {'n_estimators': 500, 'max_depth': 40, 'max_features': None, 'min_samples_leaf': 1},
+        ],
+        'gradient_boosting': [
+            {'n_estimators': 200, 'learning_rate': 0.1, 'max_depth': 3, 'subsample': 1.0},
+            {'n_estimators': 300, 'learning_rate': 0.05, 'max_depth': 3, 'subsample': 1.0},
+            {'n_estimators': 400, 'learning_rate': 0.05, 'max_depth': 4, 'subsample': 0.9},
+            {'n_estimators': 250, 'learning_rate': 0.1, 'max_depth': 2, 'subsample': 0.8},
+            {'n_estimators': 350, 'learning_rate': 0.07, 'max_depth': 3, 'subsample': 0.9},
+            {'n_estimators': 450, 'learning_rate': 0.05, 'max_depth': 2, 'subsample': 0.85},
+        ],
+    }
 
-    def __init__(self, n_folds: int = 5):
+    def __init__(self, n_folds: int = 5, show_progress: bool = True):
         """Initialize the pipeline.
         
         Args:
             n_folds: Number of folds for cross-validation.
+            show_progress: Whether to show progress bars during training.
         """
         self.n_folds = n_folds
+        self.show_progress = show_progress
         
         # Initialize components
         self.data_loader = DataLoader()
@@ -67,6 +93,9 @@ class Pipeline:
         self.best_model = None
         self.best_feature_type = None
         self.best_cv_auc = 0.0
+        self.best_algorithm = None
+        self.best_params: Dict[str, Any] = {}
+        self.holdout_auc = None
         
         logger.info(f"Initialized Pipeline with {n_folds}-fold cross-validation")
 
@@ -87,7 +116,8 @@ class Pipeline:
         mols: List, 
         feature_type: str, 
         feature_manager: FeatureManager,
-        fit: bool = True
+        fit: bool = True,
+        preprocess: bool = True
     ) -> np.ndarray:
         """Generate features of the specified type.
         
@@ -96,6 +126,7 @@ class Pipeline:
             feature_type: One of 'descriptors', 'fingerprints', 'combined'.
             feature_manager: FeatureManager instance to use.
             fit: Whether to fit the preprocessor.
+            preprocess: Whether to apply imputation/scaling via FeatureManager.
             
         Returns:
             Preprocessed feature matrix.
@@ -109,34 +140,50 @@ class Pipeline:
         else:
             raise ValueError(f"Unknown feature type: {feature_type}")
         
+        if not preprocess:
+            return features
+        
         return feature_manager.preprocess(features, fit=fit)
 
-    def _create_model(self, algorithm: str) -> Any:
+    def _create_model(
+        self, 
+        algorithm: str, 
+        params: Dict[str, Any], 
+        with_preprocessing: bool = False
+    ) -> Any:
         """Create a model instance for the specified algorithm.
         
         Args:
             algorithm: One of 'random_forest', 'gradient_boosting'.
+            params: Hyperparameter dictionary for the estimator.
+            with_preprocessing: If True, wrap the classifier with an imputer and scaler
+                so preprocessing is fitted inside each CV fold.
             
         Returns:
             An unfitted classifier instance.
         """
         if algorithm == 'random_forest':
-            return RandomForestClassifier(
-                n_estimators=100,
-                max_depth=None,
-                min_samples_split=2,
+            model = RandomForestClassifier(
                 random_state=42,
-                n_jobs=-1
+                n_jobs=-1,
+                **params
             )
         elif algorithm == 'gradient_boosting':
-            return GradientBoostingClassifier(
-                n_estimators=100,
-                learning_rate=0.1,
-                max_depth=3,
-                random_state=42
+            model = GradientBoostingClassifier(
+                random_state=42,
+                **params
             )
         else:
             raise ValueError(f"Unknown algorithm: {algorithm}")
+
+        if not with_preprocessing:
+            return model
+
+        return SklearnPipeline([
+            ('imputer', SimpleImputer(strategy='median')),
+            ('scaler', StandardScaler()),
+            ('model', model),
+        ])
 
     def load_and_parse_training_data(
         self, 
@@ -181,11 +228,20 @@ class Pipeline:
         """
         logger.info("Starting model training and evaluation")
         logger.info(f"Feature types: {self.FEATURE_TYPES}")
-        logger.info(f"Algorithms: {self.ALGORITHMS}")
+        logger.info(f"Algorithms: {list(self.MODEL_CONFIGS.keys())}")
         
         self.results = []
-        total_combinations = len(self.FEATURE_TYPES) * len(self.ALGORITHMS)
+        total_combinations = len(self.FEATURE_TYPES) * sum(
+            len(cfgs) for cfgs in self.MODEL_CONFIGS.values()
+        )
         current = 0
+        progress_bar = None
+        if self.show_progress:
+            progress_bar = tqdm(
+                total=total_combinations,
+                desc="Model/feature evaluations",
+                unit="combo"
+            )
         
         for feature_type in self.FEATURE_TYPES:
             # Create a fresh feature manager for each feature type
@@ -193,32 +249,47 @@ class Pipeline:
             self.feature_managers[feature_type] = feature_manager
             
             logger.info(f"Generating {feature_type} features...")
-            X = self._generate_features(mols, feature_type, feature_manager, fit=True)
+            # Generate raw features; preprocessing happens inside CV to avoid leakage
+            X = self._generate_features(
+                mols, feature_type, feature_manager, fit=False, preprocess=False
+            )
             logger.info(f"Feature matrix shape: {X.shape}")
             
-            for algorithm in self.ALGORITHMS:
-                current += 1
-                logger.info(
-                    f"[{current}/{total_combinations}] Evaluating {algorithm} "
-                    f"with {feature_type} features"
-                )
-                
-                model = self._create_model(algorithm)
-                cv_results = self.evaluator.cross_validate(model, X, labels)
-                
-                result = {
-                    'feature_type': feature_type,
-                    'algorithm': algorithm,
-                    'auc_mean': cv_results['auc_mean'],
-                    'auc_std': cv_results['auc_std'],
-                    'auc_scores': cv_results['auc_scores']
-                }
-                self.results.append(result)
-                
-                logger.info(
-                    f"  AUC: {cv_results['auc_mean']:.4f} ± {cv_results['auc_std']:.4f}"
-                )
+            for algorithm, configs in self.MODEL_CONFIGS.items():
+                for params in configs:
+                    current += 1
+                    logger.info(
+                        f"[{current}/{total_combinations}] Evaluating {algorithm} "
+                        f"with {feature_type} features | params={params}"
+                    )
+                    
+                    model = self._create_model(
+                        algorithm, params, with_preprocessing=True
+                    )
+                    cv_results = self.evaluator.cross_validate(
+                        model, X, labels, show_progress=self.show_progress
+                    )
+                    
+                    result = {
+                        'feature_type': feature_type,
+                        'algorithm': algorithm,
+                        'params': params,
+                        'auc_mean': cv_results['auc_mean'],
+                        'auc_std': cv_results['auc_std'],
+                        'auc_scores': cv_results['auc_scores']
+                    }
+                    self.results.append(result)
+                    
+                    logger.info(
+                        f"  AUC: {cv_results['auc_mean']:.4f} ± {cv_results['auc_std']:.4f}"
+                    )
+
+                    if progress_bar:
+                        progress_bar.update(1)
         
+        if progress_bar:
+            progress_bar.close()
+
         # Create results DataFrame
         results_df = pd.DataFrame(self.results)
         results_df = results_df.sort_values('auc_mean', ascending=False).reset_index(drop=True)
@@ -235,23 +306,56 @@ class Pipeline:
         """
         best_row = results_df.iloc[0]
         self.best_feature_type = best_row['feature_type']
-        best_algorithm = best_row['algorithm']
+        self.best_algorithm = best_row['algorithm']
+        self.best_params = best_row.get('params', {})
         self.best_cv_auc = best_row['auc_mean']
         
         logger.info(
-            f"Best model: {best_algorithm} with {self.best_feature_type} features "
-            f"(CV AUC: {self.best_cv_auc:.4f})"
+            f"Best model: {self.best_algorithm} with {self.best_feature_type} features "
+            f"(CV AUC: {self.best_cv_auc:.4f}, params={self.best_params})"
         )
         
         # Retrain on full training data
         logger.info("Retraining best model on full training data")
         feature_manager = self.feature_managers[self.best_feature_type]
-        X = self._generate_features(mols, self.best_feature_type, feature_manager, fit=True)
+        X = self._generate_features(
+            mols, self.best_feature_type, feature_manager, fit=False, preprocess=False
+        )
         
-        trainer = ModelTrainer(algorithm=best_algorithm)
-        self.best_model = trainer.train(X, labels)
+        self.best_model = self._create_model(
+            self.best_algorithm, self.best_params, with_preprocessing=True
+        )
+        self.best_model.fit(X, labels)
         
         logger.info("Best model trained successfully")
+
+    def evaluate_holdout(
+        self,
+        mols: List,
+        labels: np.ndarray,
+        test_size: float = 0.1,
+        random_state: int = 42
+    ) -> float:
+        """Estimate AUC on a hold-out split to reduce model-selection bias."""
+        feature_manager = self.feature_managers[self.best_feature_type]
+        X = self._generate_features(
+            mols, self.best_feature_type, feature_manager, fit=False, preprocess=False
+        )
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X, labels, test_size=test_size, stratify=labels, random_state=random_state
+        )
+
+        holdout_model = self._create_model(
+            self.best_algorithm, self.best_params, with_preprocessing=True
+        )
+        holdout_model.fit(X_train, y_train)
+        y_val_proba = holdout_model.predict_proba(X_val)[:, 1]
+        auc = roc_auc_score(y_val, y_val_proba)
+        self.holdout_auc = auc
+
+        logger.info(f"Hold-out AUC (test_size={test_size}): {auc:.4f}")
+        return auc
 
 
     def report_results(self, results_df: pd.DataFrame):
@@ -277,6 +381,8 @@ class Pipeline:
         print(f"BEST MODEL: {results_df.iloc[0]['algorithm']} "
               f"with {results_df.iloc[0]['feature_type']} features")
         print(f"ESTIMATED TEST AUC: {self.best_cv_auc:.4f}")
+        if self.holdout_auc is not None:
+            print(f"HOLD-OUT AUC (bias-reduced): {self.holdout_auc:.4f}")
         print("=" * 70 + "\n")
 
     def run_training_pipeline(self, training_filepath: str) -> pd.DataFrame:
@@ -298,6 +404,9 @@ class Pipeline:
         
         # Select best model
         self.select_best_model(results_df, mols, labels)
+
+        # Hold-out evaluation for unbiased estimate
+        self.evaluate_holdout(mols, labels)
         
         # Report results
         self.report_results(results_df)
@@ -370,7 +479,8 @@ class Pipeline:
             mols, 
             self.best_feature_type, 
             feature_manager, 
-            fit=False  # Use fitted preprocessor from training
+            fit=False,
+            preprocess=False  # Preprocessing is inside the trained model pipeline
         )
         logger.info(f"Test feature matrix shape: {X_test.shape}")
         

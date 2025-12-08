@@ -9,6 +9,7 @@ from typing import Any, Dict, List
 
 import numpy as np
 import pandas as pd
+from tqdm.auto import tqdm
 from sklearn.model_selection import StratifiedKFold, cross_val_score
 from sklearn.metrics import roc_auc_score
 
@@ -39,7 +40,8 @@ class ModelEvaluator:
         self, 
         model: Any, 
         X: np.ndarray, 
-        y: np.ndarray
+        y: np.ndarray,
+        show_progress: bool = False
     ) -> Dict:
         """Perform k-fold cross-validation and return AUC metrics.
         
@@ -51,6 +53,7 @@ class ModelEvaluator:
             model: A classifier with fit and predict_proba methods.
             X: Feature matrix of shape (n_samples, n_features).
             y: Label vector of shape (n_samples,).
+            show_progress: If True, display a progress bar over folds.
             
         Returns:
             Dictionary containing:
@@ -82,7 +85,17 @@ class ModelEvaluator:
         skf = StratifiedKFold(n_splits=self.n_folds, shuffle=True, random_state=42)
         
         auc_scores = []
-        
+        pbar = None
+        if show_progress:
+            pbar = tqdm(
+                total=self.n_folds,
+                desc="CV folds",
+                leave=False,
+                unit="fold",
+                dynamic_ncols=True,
+                miniters=1
+            )
+
         for fold_idx, (train_idx, val_idx) in enumerate(skf.split(X, y)):
             # Split data for this fold
             X_train, X_val = X[train_idx], X[val_idx]
@@ -103,6 +116,11 @@ class ModelEvaluator:
             auc_scores.append(fold_auc)
             
             logger.debug(f"Fold {fold_idx + 1}/{self.n_folds}: AUC = {fold_auc:.4f}")
+            if pbar:
+                pbar.update(1)
+
+        if pbar:
+            pbar.close()
         
         auc_mean = np.mean(auc_scores)
         auc_std = np.std(auc_scores)
