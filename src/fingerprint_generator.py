@@ -22,12 +22,12 @@ class FingerprintGenerator:
     radius and bit length for molecular feature representation.
     """
 
-    def __init__(self, radius: int = 2, n_bits: int = 1024):
+    def __init__(self, radius: int = 2, n_bits: int = 512):
         """Initialize the fingerprint generator.
         
         Args:
             radius: The radius of the Morgan fingerprint (default 2).
-            n_bits: The length of the fingerprint bit vector (default 1024).
+            n_bits: The length of the fingerprint bit vector (default 512).
         """
         self.radius = radius
         self.n_bits = n_bits
