@@ -528,7 +528,9 @@ class Pipeline:
     def predict_test_set(
         self, 
         test_filepath: str, 
-        output_filepath: str
+        output_filepath: str,
+        submission_filepath: Optional[str] = None,
+        auc_estimate: Optional[float] = None
     ) -> np.ndarray:
         """Generate predictions for the test set and save to CSV.
         
@@ -539,6 +541,10 @@ class Pipeline:
         Args:
             test_filepath: Path to test CSV file.
             output_filepath: Path to save predictions CSV.
+            submission_filepath: Optional path to save competition-style submission
+                with AUC estimate on first line followed by probabilities.
+            auc_estimate: Optional AUC estimate to place on first line. If None,
+                uses holdout AUC if available, else best CV AUC.
             
         Returns:
             Array of probability predictions.
@@ -578,6 +584,20 @@ class Pipeline:
         
         # Save predictions to CSV
         self.predictor.save_predictions(indices, probabilities, output_filepath)
+
+        if submission_filepath:
+            # Use holdout AUC if available, otherwise CV mean
+            estimate = auc_estimate
+            if estimate is None:
+                estimate = self.holdout_auc if self.holdout_auc is not None else self.best_cv_auc
+            if estimate is None:
+                raise ValueError("No AUC estimate available to write submission file.")
+            submission_values = np.concatenate([[estimate], probabilities])
+            np.savetxt(submission_filepath, submission_values, fmt="%.10f")
+            logger.info(
+                f"Saved submission file with AUC estimate to {submission_filepath} "
+                f"(entries: {len(submission_values)})"
+            )
         
         # Report
         print("\n" + "=" * 70)
@@ -761,6 +781,7 @@ def main():
     training_file = 'training_smiles.csv'
     test_file = 'test_smiles.csv'
     output_file = 'predictions.csv'
+    submission_file = 'submission.txt'  # override with group number if desired
     
     # Quick demo mode: run on a subsample with fewer folds/configs
     if len(sys.argv) > 1 and sys.argv[1] == 'quick_demo':
@@ -784,7 +805,9 @@ def main():
         cv_results_path="cv_results.csv",
         best_summary_path="best_model_summary.json"
     )
-    predictions = pipeline.predict_test_set(test_file, output_file)
+    predictions = pipeline.predict_test_set(
+        test_file, output_file, submission_filepath=submission_file
+    )
     
     logger.info("Full pipeline complete")
     
