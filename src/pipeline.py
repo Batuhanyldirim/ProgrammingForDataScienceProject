@@ -10,13 +10,14 @@ from typing import Dict, List, Tuple, Any
 
 import numpy as np
 import pandas as pd
-from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.ensemble import RandomForestClassifier
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline as SklearnPipeline
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 from tqdm.auto import tqdm
+import xgboost as xgb
 
 from .data_loader import DataLoader
 from .smiles_parser import SMILESParser
@@ -57,13 +58,13 @@ class Pipeline:
             {'n_estimators': 400, 'max_depth': 30, 'max_features': 'sqrt', 'min_samples_leaf': 2},
             {'n_estimators': 500, 'max_depth': 40, 'max_features': None, 'min_samples_leaf': 1},
         ],
-        'gradient_boosting': [
-            {'n_estimators': 200, 'learning_rate': 0.1, 'max_depth': 3, 'subsample': 1.0},
-            {'n_estimators': 300, 'learning_rate': 0.05, 'max_depth': 3, 'subsample': 1.0},
-            {'n_estimators': 400, 'learning_rate': 0.05, 'max_depth': 4, 'subsample': 0.9},
-            {'n_estimators': 250, 'learning_rate': 0.1, 'max_depth': 2, 'subsample': 0.8},
-            {'n_estimators': 350, 'learning_rate': 0.07, 'max_depth': 3, 'subsample': 0.9},
-            {'n_estimators': 450, 'learning_rate': 0.05, 'max_depth': 2, 'subsample': 0.85},
+        'xgboost': [
+            {'n_estimators': 400, 'learning_rate': 0.1, 'max_depth': 6, 'subsample': 0.8, 'colsample_bytree': 0.8},
+            {'n_estimators': 600, 'learning_rate': 0.05, 'max_depth': 6, 'subsample': 0.9, 'colsample_bytree': 0.9},
+            {'n_estimators': 800, 'learning_rate': 0.05, 'max_depth': 8, 'subsample': 0.8, 'colsample_bytree': 0.8},
+            {'n_estimators': 500, 'learning_rate': 0.1, 'max_depth': 4, 'subsample': 0.9, 'colsample_bytree': 0.9},
+            {'n_estimators': 700, 'learning_rate': 0.07, 'max_depth': 6, 'subsample': 0.85, 'colsample_bytree': 0.85},
+            {'n_estimators': 900, 'learning_rate': 0.05, 'max_depth': 5, 'subsample': 0.8, 'colsample_bytree': 0.8},
         ],
     }
 
@@ -168,9 +169,12 @@ class Pipeline:
                 n_jobs=-1,
                 **params
             )
-        elif algorithm == 'gradient_boosting':
-            model = GradientBoostingClassifier(
-                random_state=42,
+        elif algorithm == 'xgboost':
+            model = xgb.XGBClassifier(
+                objective='binary:logistic',
+                eval_metric='logloss',
+                tree_method='hist',
+                n_jobs=-1,
                 **params
             )
         else:

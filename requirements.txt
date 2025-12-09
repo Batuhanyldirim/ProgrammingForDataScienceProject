@@ -4,3 +4,4 @@ numpy
 scikit-learn
 hypothesis
 tqdm
+xgboost
