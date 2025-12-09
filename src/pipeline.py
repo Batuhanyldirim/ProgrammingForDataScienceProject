@@ -243,7 +243,7 @@ class Pipeline:
         if sample_size is not None and sample_size < len(df):
             logger.info(f"Subsampling training data to {sample_size} rows for quick run")
             all_idx = np.arange(len(df))
-            _, sample_idx = train_test_split(
+            sample_idx, _ = train_test_split(
                 all_idx,
                 train_size=sample_size,
                 stratify=labels,
@@ -689,16 +689,25 @@ def run_two_phase(
     training_file: str = 'training_smiles.csv',
     test_file: str = 'test_smiles.csv',
     output_file: str = 'predictions_two_phase.csv',
-    phase_a_sample_size: int = 20000,
+    phase_a_sample_size: int = 8000,
     phase_a_folds: int = 2,
     phase_b_folds: int = 5,
     top_k: int = 3,
     phase_a_cv_path: str = "cv_results_phase_a.csv",
     phase_b_cv_path: str = "cv_results_phase_b.csv",
     phase_a_summary_path: str = "phase_a_summary.json",
-    phase_b_summary_path: str = "best_model_summary_phase_b.json"
+    phase_b_summary_path: str = "best_model_summary_phase_b.json",
+    submission_filepath: Optional[str] = None,
+    submission_auc_estimate: Optional[float] = None
 ):
-    """Two-phase training: fast exploratory pass, then focused refinement."""
+    """Two-phase training: fast exploratory pass, then focused refinement.
+
+    If submission_filepath is provided, a headerless submission file is written
+    with the estimated AUC on the first line followed by the test-set
+    probabilities in test-file order (one value per line). You can override the
+    AUC written on the first line with submission_auc_estimate; otherwise the
+    hold-out AUC (or CV mean if no hold-out) is used.
+    """
     # Phase A: exploratory on subsample with fewer folds
     pipeline_a = Pipeline(
         n_folds=phase_a_folds,
@@ -770,7 +779,12 @@ def run_two_phase(
     logger.info(f"Phase B complete. Saved results to {phase_b_cv_path} and {phase_b_summary_path}")
 
     # Predict test set with final winner
-    pipeline_b.predict_test_set(test_file, output_file)
+    pipeline_b.predict_test_set(
+        test_file,
+        output_file,
+        submission_filepath=submission_filepath,
+        auc_estimate=submission_auc_estimate
+    )
     logger.info("Two-phase pipeline complete")
     return pipeline_b, results_a, results_b
 
@@ -789,10 +803,17 @@ def main():
         return
     # Two-phase mode: exploratory + refinement
     if len(sys.argv) > 1 and sys.argv[1] == 'two_phase':
+        submission_two_phase = 'submission_two_phase.txt'
+        if len(sys.argv) > 2:
+            raw_arg = sys.argv[2]
+            submission_two_phase = (
+                raw_arg if raw_arg.endswith(".txt") else f"{raw_arg}.txt"
+            )
         run_two_phase(
             training_file=training_file,
             test_file=test_file,
-            output_file='predictions_two_phase.csv'
+            output_file='predictions_two_phase.csv',
+            submission_filepath=submission_two_phase
         )
         return
 
